@@ -7,16 +7,14 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use enigo::{
-    Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings, set_dpi_awareness,
-};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use serde::{Deserialize, Serialize};
 use xcap::Monitor;
 
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "Windows desktop control helper driven by Codex CLI vision"
+    about = "Cross-platform desktop control helper driven by Codex CLI vision"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -52,9 +50,9 @@ enum Commands {
         /// Output directory for screenshots and Codex response JSON.
         #[arg(long, default_value = "runs")]
         out_dir: PathBuf,
-        /// Codex executable to run.
-        #[arg(long, default_value = "codex.cmd")]
-        codex_bin: String,
+        /// Codex executable to run. Defaults to codex.cmd on Windows and codex elsewhere.
+        #[arg(long)]
+        codex_bin: Option<String>,
         /// Actually execute the returned mouse/keyboard actions.
         #[arg(long)]
         execute: bool,
@@ -69,6 +67,12 @@ enum Commands {
         /// Add this desktop Y origin to screenshot-relative coordinates.
         #[arg(long, default_value_t = 0)]
         origin_y: i32,
+        /// Divide screenshot X coordinates by this scale before adding origin-x.
+        #[arg(long, default_value_t = 1.0)]
+        scale_x: f32,
+        /// Divide screenshot Y coordinates by this scale before adding origin-y.
+        #[arg(long, default_value_t = 1.0)]
+        scale_y: f32,
     },
     /// Move and click an absolute desktop coordinate.
     Click {
@@ -142,9 +146,19 @@ struct CapturedScreen {
     monitor_index: usize,
     origin_x: i32,
     origin_y: i32,
-    width: u32,
-    height: u32,
+    desktop_width: u32,
+    desktop_height: u32,
+    image_width: u32,
+    image_height: u32,
     monitor_name: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CoordinateTransform {
+    origin_x: i32,
+    origin_y: i32,
+    scale_x: f32,
+    scale_y: f32,
 }
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -166,11 +180,7 @@ fn main() -> Result<()> {
         } => {
             let captures = capture_monitors(monitor, all_monitors, &out_dir)?;
             for capture in captures {
-                println!(
-                    "monitor_index={} screenshot={}",
-                    capture.monitor_index,
-                    capture.path.display()
-                );
+                print_capture(&capture);
             }
             Ok(())
         }
@@ -181,21 +191,26 @@ fn main() -> Result<()> {
             out_dir,
             codex_bin,
             execute,
-        } => ask_codex(
-            &codex_bin,
-            &instruction,
-            monitor,
-            all_monitors,
-            &out_dir,
-            execute,
-        ),
+        } => {
+            let codex_bin = codex_bin.unwrap_or_else(default_codex_bin);
+            ask_codex(
+                &codex_bin,
+                &instruction,
+                monitor,
+                all_monitors,
+                &out_dir,
+                execute,
+            )
+        }
         Commands::Execute {
             plan,
             origin_x,
             origin_y,
+            scale_x,
+            scale_y,
         } => {
             let plan = read_plan(&plan)?;
-            execute_plan(&plan, origin_x, origin_y)
+            execute_plan(&plan, origin_x, origin_y, scale_x, scale_y)
         }
         Commands::Click { x, y, button } => click_at(x, y, button.into()),
     }
@@ -204,7 +219,27 @@ fn main() -> Result<()> {
 fn init_dpi_awareness() {
     #[cfg(target_os = "windows")]
     {
-        let _ = set_dpi_awareness();
+        let _ = enigo::set_dpi_awareness();
+    }
+}
+
+fn default_codex_bin() -> String {
+    if cfg!(target_os = "windows") {
+        "codex.cmd".to_string()
+    } else {
+        "codex".to_string()
+    }
+}
+
+fn platform_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        std::env::consts::OS
     }
 }
 
@@ -259,11 +294,7 @@ fn ask_codex(
     }
 
     for capture in &captures {
-        println!(
-            "monitor_index={} screenshot={}",
-            capture.monitor_index,
-            capture.path.display()
-        );
+        print_capture(capture);
     }
     println!("plan={}", response_path.display());
 
@@ -283,14 +314,16 @@ fn build_codex_prompt(instruction: &str, captures: &[CapturedScreen]) -> String 
         .enumerate()
         .map(|(image_index, capture)| {
             format!(
-                "Image {}: monitor_index={}, monitor_name={:?}, desktop_origin=({}, {}), image_size={}x{}, file={}",
+                "Image {}: monitor_index={}, monitor_name={:?}, desktop_origin=({}, {}), desktop_size={}x{}, image_size={}x{}, file={}",
                 image_index + 1,
                 capture.monitor_index,
                 capture.monitor_name,
                 capture.origin_x,
                 capture.origin_y,
-                capture.width,
-                capture.height,
+                capture.desktop_width,
+                capture.desktop_height,
+                capture.image_width,
+                capture.image_height,
                 capture.path.display()
             )
         })
@@ -298,16 +331,18 @@ fn build_codex_prompt(instruction: &str, captures: &[CapturedScreen]) -> String 
         .join("; ");
 
     format!(
-        "You are controlling a Windows desktop from attached screenshot images. \
+        "You are controlling a {} desktop from attached screenshot images. \
 Return only a JSON action plan matching the schema. \
-Use coordinates relative to the selected screenshot image, not absolute desktop coordinates. \
+Use coordinates relative to the selected screenshot image pixels, not absolute desktop coordinates. \
 For every coordinate action, set monitor_index to the monitor_index of the screenshot image used for that coordinate. \
 For actions without coordinates, set monitor_index to null. \
 Screenshots: {}. \
 Prefer a single precise click action when the user asks to click a visible target. \
 If the target is ambiguous, return an empty actions array and explain the ambiguity in summary. \
 User instruction: {}",
-        screenshots, instruction
+        platform_name(),
+        screenshots,
+        instruction
     )
 }
 
@@ -328,6 +363,8 @@ fn capture_monitors(
 fn capture_selected_monitor(selected: SelectedMonitor, out_dir: &Path) -> Result<CapturedScreen> {
     let monitor = selected.monitor;
     let image = monitor.capture_image()?;
+    let image_width = image.width();
+    let image_height = image.height();
     let monitor_name = monitor
         .friendly_name()
         .unwrap_or_else(|_| "monitor".to_string());
@@ -345,8 +382,10 @@ fn capture_selected_monitor(selected: SelectedMonitor, out_dir: &Path) -> Result
         monitor_index: selected.index,
         origin_x: monitor.x()?,
         origin_y: monitor.y()?,
-        width: monitor.width()?,
-        height: monitor.height()?,
+        desktop_width: monitor.width()?,
+        desktop_height: monitor.height()?,
+        image_width,
+        image_height,
         monitor_name,
     })
 }
@@ -402,16 +441,25 @@ fn select_monitors(index: Option<usize>, all_monitors: bool) -> Result<Vec<Selec
         .ok_or_else(|| anyhow!("no monitor available"))
 }
 
-fn execute_plan(plan: &ActionPlan, origin_x: i32, origin_y: i32) -> Result<()> {
-    execute_plan_with_origin_resolver(plan, |_| Ok((origin_x, origin_y)))
+fn execute_plan(
+    plan: &ActionPlan,
+    origin_x: i32,
+    origin_y: i32,
+    scale_x: f32,
+    scale_y: f32,
+) -> Result<()> {
+    execute_plan_with_transform_resolver(plan, |_| {
+        Ok(CoordinateTransform::new(
+            origin_x, origin_y, scale_x, scale_y,
+        ))
+    })
 }
 
 fn execute_plan_for_captures(plan: &ActionPlan, captures: &[CapturedScreen]) -> Result<()> {
-    execute_plan_with_origin_resolver(plan, |action| {
+    execute_plan_with_transform_resolver(plan, |action| {
         let Some(monitor_index) = action.monitor_index() else {
             if captures.len() == 1 {
-                let capture = &captures[0];
-                return Ok((capture.origin_x, capture.origin_y));
+                return Ok(captures[0].coordinate_transform());
             }
 
             bail!("coordinate action is missing monitor_index in a multi-monitor plan");
@@ -420,14 +468,14 @@ fn execute_plan_for_captures(plan: &ActionPlan, captures: &[CapturedScreen]) -> 
         captures
             .iter()
             .find(|capture| capture.monitor_index == monitor_index)
-            .map(|capture| (capture.origin_x, capture.origin_y))
+            .map(CapturedScreen::coordinate_transform)
             .ok_or_else(|| anyhow!("monitor_index {monitor_index} was not captured"))
     })
 }
 
-fn execute_plan_with_origin_resolver<F>(plan: &ActionPlan, mut origin_for: F) -> Result<()>
+fn execute_plan_with_transform_resolver<F>(plan: &ActionPlan, mut transform_for: F) -> Result<()>
 where
-    F: FnMut(&Action) -> Result<(i32, i32)>,
+    F: FnMut(&Action) -> Result<CoordinateTransform>,
 {
     let mut enigo = Enigo::new(&Settings::default()).map_err(|err| anyhow!("{err}"))?;
 
@@ -448,9 +496,8 @@ where
 
         match action {
             Action::MoveMouse { x, y, .. } => {
-                let (origin_x, origin_y) = origin_for(action)?;
-                let desktop_x = origin_x + x;
-                let desktop_y = origin_y + y;
+                let transform = transform_for(action)?;
+                let (desktop_x, desktop_y) = transform.to_desktop(*x, *y);
                 transcript_action(
                     step,
                     action_count,
@@ -469,9 +516,8 @@ where
                     .map_err(|err| anyhow!("{err}"))?;
             }
             Action::Click { x, y, .. } => {
-                let (origin_x, origin_y) = origin_for(action)?;
-                let desktop_x = origin_x + x;
-                let desktop_y = origin_y + y;
+                let transform = transform_for(action)?;
+                let (desktop_x, desktop_y) = transform.to_desktop(*x, *y);
                 transcript_action(
                     step,
                     action_count,
@@ -488,9 +534,8 @@ where
                 move_and_click(&mut enigo, desktop_x, desktop_y, Button::Left)?;
             }
             Action::DoubleClick { x, y, .. } => {
-                let (origin_x, origin_y) = origin_for(action)?;
-                let desktop_x = origin_x + x;
-                let desktop_y = origin_y + y;
+                let transform = transform_for(action)?;
+                let (desktop_x, desktop_y) = transform.to_desktop(*x, *y);
                 transcript_action(
                     step,
                     action_count,
@@ -508,9 +553,8 @@ where
                 move_and_click(&mut enigo, desktop_x, desktop_y, Button::Left)?;
             }
             Action::RightClick { x, y, .. } => {
-                let (origin_x, origin_y) = origin_for(action)?;
-                let desktop_x = origin_x + x;
-                let desktop_y = origin_y + y;
+                let transform = transform_for(action)?;
+                let (desktop_x, desktop_y) = transform.to_desktop(*x, *y);
                 transcript_action(
                     step,
                     action_count,
@@ -541,9 +585,8 @@ where
             }
             Action::Scroll { amount, x, y, .. } => {
                 if let (Some(x), Some(y)) = (x, y) {
-                    let (origin_x, origin_y) = origin_for(action)?;
-                    let desktop_x = origin_x + x;
-                    let desktop_y = origin_y + y;
+                    let transform = transform_for(action)?;
+                    let (desktop_x, desktop_y) = transform.to_desktop(*x, *y);
                     transcript_action(
                         step,
                         action_count,
@@ -599,6 +642,23 @@ fn transcript_action(step: usize, total: usize, action: &str, details: &str) {
     );
 }
 
+fn print_capture(capture: &CapturedScreen) {
+    let transform = capture.coordinate_transform();
+    println!(
+        "monitor_index={} screenshot={} origin=({}, {}) desktop_size={}x{} image_size={}x{} scale=({:.3}, {:.3})",
+        capture.monitor_index,
+        capture.path.display(),
+        capture.origin_x,
+        capture.origin_y,
+        capture.desktop_width,
+        capture.desktop_height,
+        capture.image_width,
+        capture.image_height,
+        transform.scale_x,
+        transform.scale_y
+    );
+}
+
 fn format_monitor_index(monitor_index: Option<usize>) -> String {
     monitor_index
         .map(|index| index.to_string())
@@ -620,6 +680,55 @@ impl Action {
             | Action::Scroll { monitor_index, .. } => *monitor_index,
         }
     }
+}
+
+impl CapturedScreen {
+    fn coordinate_transform(&self) -> CoordinateTransform {
+        CoordinateTransform::new(
+            self.origin_x,
+            self.origin_y,
+            coordinate_scale(self.image_width, self.desktop_width),
+            coordinate_scale(self.image_height, self.desktop_height),
+        )
+    }
+}
+
+impl CoordinateTransform {
+    fn new(origin_x: i32, origin_y: i32, scale_x: f32, scale_y: f32) -> Self {
+        Self {
+            origin_x,
+            origin_y,
+            scale_x: sanitize_scale(scale_x),
+            scale_y: sanitize_scale(scale_y),
+        }
+    }
+
+    fn to_desktop(self, screenshot_x: i32, screenshot_y: i32) -> (i32, i32) {
+        (
+            self.origin_x + scale_coordinate(screenshot_x, self.scale_x),
+            self.origin_y + scale_coordinate(screenshot_y, self.scale_y),
+        )
+    }
+}
+
+fn coordinate_scale(image_size: u32, desktop_size: u32) -> f32 {
+    if desktop_size == 0 {
+        return 1.0;
+    }
+
+    sanitize_scale(image_size as f32 / desktop_size as f32)
+}
+
+fn sanitize_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+fn scale_coordinate(value: i32, scale: f32) -> i32 {
+    (value as f32 / sanitize_scale(scale)).round() as i32
 }
 
 fn click_at(x: i32, y: i32, button: Button) -> Result<()> {
@@ -680,7 +789,7 @@ impl From<MouseButton> for Button {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ActionPlan};
+    use super::{Action, ActionPlan, CoordinateTransform, coordinate_scale};
 
     #[test]
     fn parses_strict_schema_click_with_nullable_unused_fields() {
@@ -721,5 +830,19 @@ mod tests {
         assert!(
             matches!(plan.actions[0], Action::TypeText { monitor_index: None, ref text } if text == "hello")
         );
+    }
+
+    #[test]
+    fn converts_retina_screenshot_pixels_to_desktop_coordinates() {
+        let transform = CoordinateTransform::new(100, 50, 2.0, 2.0);
+
+        assert_eq!(transform.to_desktop(400, 200), (300, 150));
+    }
+
+    #[test]
+    fn derives_coordinate_scale_from_image_and_desktop_sizes() {
+        assert_eq!(coordinate_scale(3840, 1920), 2.0);
+        assert_eq!(coordinate_scale(1920, 1920), 1.0);
+        assert_eq!(coordinate_scale(1920, 0), 1.0);
     }
 }

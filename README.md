@@ -1,6 +1,7 @@
 # Tengan CUA
 
-Rust helper for Windows desktop control where Codex CLI receives the screenshot.
+Rust helper for desktop control on Windows, Ubuntu/Linux, and macOS where Codex
+CLI receives the screenshot.
 
 ## Flow
 
@@ -9,37 +10,63 @@ Rust helper for Windows desktop control where Codex CLI receives the screenshot.
 3. Ask Codex to return a structured action plan with screenshot-relative coordinates.
 4. Optionally execute the plan with `enigo`.
 
-The app sets Windows DPI awareness at startup so screenshot coordinates and mouse coordinates line up on scaled monitors.
+The app captures screenshot pixel dimensions separately from desktop coordinate
+dimensions. That keeps clicks aligned on Windows scaling, macOS Retina displays,
+and Ubuntu/Linux fractional scaling.
+
+## Platform Setup
+
+Install Rust and the Codex CLI on every platform.
+
+Ubuntu/Debian build dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libxkbcommon-dev
+```
+
+Linux notes:
+
+- X11 is the most reliable input-control path.
+- Wayland screenshot capture uses the desktop portal or compositor support and
+  may prompt for permission.
+- Wayland input simulation depends on compositor support. If execution is
+  blocked, use an X11 session for `--execute`.
+
+macOS notes:
+
+- Grant Screen Recording permission to the terminal app running `cargo`.
+- Grant Accessibility permission before using `--execute`.
 
 ## Commands
 
 List monitor indexes:
 
-```powershell
+```sh
 cargo run -- monitors
 ```
 
 Capture the primary monitor:
 
-```powershell
+```sh
 cargo run -- capture
 ```
 
 Capture every monitor:
 
-```powershell
+```sh
 cargo run -- capture --all-monitors
 ```
 
 Ask Codex where to click, without moving the mouse:
 
-```powershell
+```sh
 cargo run -- ask-codex "click the Save button"
 ```
 
 Ask Codex and execute the returned action plan:
 
-```powershell
+```sh
 cargo run -- ask-codex "click the Save button" --execute
 ```
 
@@ -48,49 +75,64 @@ mouse, keyboard, or scroll action before it is performed.
 
 Use a specific monitor:
 
-```powershell
+```sh
 cargo run -- ask-codex "click the search box" --monitor 1 --execute
 ```
 
-Continuously monitor one monitor:
+Continuously monitor the primary monitor on Linux/macOS:
 
-```powershell
-.\watch-monitor.ps1 -Monitor 1
+```sh
+sh ./watch-monitor.sh
 ```
 
-On macOS:
+Continuously monitor a specific monitor on Linux/macOS:
 
 ```sh
 sh ./watch-monitor.sh --monitor 1
 ```
 
-Continuously monitor and execute allowed actions with a transcript file:
+Continuously monitor a specific monitor on Windows:
+
+```powershell
+.\watch-monitor.ps1 -Monitor 1
+```
+
+Continuously monitor and execute allowed actions with a transcript file on
+Linux/macOS:
+
+```sh
+sh ./watch-monitor.sh --execute --transcript-file ./transcript.log
+```
+
+Continuously monitor and execute allowed actions with a transcript file on
+Windows:
 
 ```powershell
 .\watch-monitor.ps1 -Monitor 1 -Execute -TranscriptFile .\transcript.log
 ```
 
-On macOS:
-
-```sh
-sh ./watch-monitor.sh --monitor 1 --execute --transcript-file ./transcript.log
-```
-
 Send every monitor to Codex:
 
-```powershell
+```sh
 cargo run -- ask-codex "what do you see on the screen" --all-monitors
 ```
 
 Execute a previously saved plan:
 
-```powershell
-cargo run -- execute runs\codex-action-123.json --origin-x 0 --origin-y 0
+```sh
+cargo run -- execute runs/codex-action-123.json --origin-x 0 --origin-y 0
+```
+
+For saved plans from a scaled display, reuse the `scale=(x, y)` values printed
+with the screenshot:
+
+```sh
+cargo run -- execute runs/codex-action-123.json --origin-x 0 --origin-y 0 --scale-x 2 --scale-y 2
 ```
 
 Direct absolute click:
 
-```powershell
+```sh
 cargo run -- click 540 320
 ```
 
@@ -99,8 +141,10 @@ cargo run -- click 540 320
 Codex receives the screenshot file directly through `--image`. The prompt tells Codex:
 
 - return JSON matching `schemas/codex_action.schema.json`
-- use coordinates relative to the screenshot image
+- use coordinates relative to the screenshot image pixels
 - include `monitor_index` for every coordinate action
 - explain ambiguity instead of guessing
 
-The Rust side adds the selected monitor's desktop origin before executing actions, so monitor-local screenshot coordinates become absolute desktop coordinates.
+The Rust side converts screenshot pixel coordinates to desktop coordinates using
+the captured image size and monitor desktop size, then adds the selected
+monitor's desktop origin before executing actions.

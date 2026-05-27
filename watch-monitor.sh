@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-MONITOR=1
+MONITOR=""
 INTERVAL_SECONDS=10
 CONTEXT_FILE=""
 INSTRUCTION="Inspect this monitor and summarize important changes. Return an empty actions array unless action is explicitly required."
@@ -14,10 +14,10 @@ usage() {
     cat <<'EOF'
 Usage: sh ./watch-monitor.sh [options]
 
-Continuously monitor one macOS display with the Tengan CUA Codex workflow.
+Continuously monitor one Linux or macOS display with the Tengan CUA Codex workflow.
 
 Options:
-  -m, --monitor <index>          Monitor index from `cargo run -- monitors` (default: 1)
+  -m, --monitor <index>          Monitor index from `cargo run -- monitors` (default: primary)
   -i, --interval-seconds <sec>   Delay between monitor checks (default: 10)
   -c, --context-file <path>      Context file to reload each loop (default: ./context.txt)
   -n, --instruction <text>       Current task appended after the context
@@ -28,6 +28,7 @@ Options:
   -h, --help                     Show this help
 
 Examples:
+  sh ./watch-monitor.sh
   sh ./watch-monitor.sh --monitor 1
   sh ./watch-monitor.sh --monitor 1 --interval-seconds 30 --instruction "Watch for error dialogs and report them."
   sh ./watch-monitor.sh --monitor 1 --execute --instruction "If a visible error dialog appears, click OK. Otherwise do nothing."
@@ -138,14 +139,18 @@ cd "$PROJECT_ROOT" || exit 1
 
 if [ ! -f "$CONTEXT_FILE" ]; then
     cat > "$CONTEXT_FILE" <<'EOF'
-You are monitoring this macOS desktop screen.
+You are monitoring this desktop screen.
 Only report important changes.
 Do not click, type, scroll, or move the mouse unless the user explicitly asks for an action.
 Return an empty actions array unless an action is explicitly required.
 EOF
 fi
 
-printf '%bWatching monitor %s every %s seconds.%b\n' "$CYAN" "$MONITOR" "$INTERVAL_SECONDS" "$RESET"
+if [ -n "$MONITOR" ]; then
+    printf '%bWatching monitor %s every %s seconds.%b\n' "$CYAN" "$MONITOR" "$INTERVAL_SECONDS" "$RESET"
+else
+    printf '%bWatching primary monitor every %s seconds.%b\n' "$CYAN" "$INTERVAL_SECONDS" "$RESET"
+fi
 printf '%bContext: %s%b\n' "$DARK_CYAN" "$CONTEXT_FILE" "$RESET"
 if [ -n "$TRANSCRIPT_FILE" ]; then
     printf '%bTranscript file: %s%b\n' "$DARK_CYAN" "$TRANSCRIPT_FILE" "$RESET"
@@ -161,14 +166,28 @@ while true; do
 Current task: ${INSTRUCTION}"
     TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
 
-    printf '\n%b[%s] Capturing monitor %s...%b\n' "$CYAN" "$TIMESTAMP" "$MONITOR" "$RESET"
-
-    if [ "$EXECUTE" -eq 1 ]; then
-        cargo run -- ask-codex "$PROMPT" --monitor "$MONITOR" --codex-bin "$CODEX_BIN" --execute
-        STATUS=$?
+    if [ -n "$MONITOR" ]; then
+        printf '\n%b[%s] Capturing monitor %s...%b\n' "$CYAN" "$TIMESTAMP" "$MONITOR" "$RESET"
     else
-        cargo run -- ask-codex "$PROMPT" --monitor "$MONITOR" --codex-bin "$CODEX_BIN"
-        STATUS=$?
+        printf '\n%b[%s] Capturing primary monitor...%b\n' "$CYAN" "$TIMESTAMP" "$RESET"
+    fi
+
+    if [ -n "$MONITOR" ]; then
+        if [ "$EXECUTE" -eq 1 ]; then
+            cargo run -- ask-codex "$PROMPT" --monitor "$MONITOR" --codex-bin "$CODEX_BIN" --execute
+            STATUS=$?
+        else
+            cargo run -- ask-codex "$PROMPT" --monitor "$MONITOR" --codex-bin "$CODEX_BIN"
+            STATUS=$?
+        fi
+    else
+        if [ "$EXECUTE" -eq 1 ]; then
+            cargo run -- ask-codex "$PROMPT" --codex-bin "$CODEX_BIN" --execute
+            STATUS=$?
+        else
+            cargo run -- ask-codex "$PROMPT" --codex-bin "$CODEX_BIN"
+            STATUS=$?
+        fi
     fi
 
     if [ "$STATUS" -ne 0 ]; then
