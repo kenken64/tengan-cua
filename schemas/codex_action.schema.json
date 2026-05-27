@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "confidence", "actions"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Short explanation of what target was found and why."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "monitor_index", "x", "y", "text", "amount"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["move_mouse", "click", "double_click", "right_click", "type_text", "scroll"]
+          },
+          "monitor_index": {
+            "type": ["integer", "null"],
+            "description": "Monitor index for coordinate actions, matching the prompt's screenshot metadata. Null for actions without coordinates."
+          },
+          "x": {
+            "type": ["integer", "null"],
+            "description": "X coordinate relative to the screenshot image."
+          },
+          "y": {
+            "type": ["integer", "null"],
+            "description": "Y coordinate relative to the screenshot image."
+          },
+          "text": {
+            "type": ["string", "null"]
+          },
+          "amount": {
+            "type": ["integer", "null"],
+            "description": "Scroll wheel clicks. Positive means down, negative means up."
+          }
+        }
+      }
+    }
+  }
+}
