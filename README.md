@@ -58,6 +58,36 @@ Capture every monitor:
 cargo run -- capture --all-monitors
 ```
 
+Record monitor 0 to MP4 for 60 seconds:
+
+```sh
+cargo run -- record-monitor --monitor 0 --seconds 60
+```
+
+Record monitor 1 to a specific MP4 path:
+
+```sh
+cargo run -- record-monitor --monitor 1 --seconds 60 --output runs/recordings/monitor-1.mp4 --overwrite
+```
+
+Record monitor 0 to one folder and extract frames to another folder:
+
+```sh
+cargo run -- record-monitor --monitor 0 --seconds 60 --output runs/recordings/monitor-0.mp4 --frames-dir runs/frames/monitor-0 --frame-fps 0.5 --overwrite
+```
+
+Extract frames later from an existing MP4:
+
+```sh
+cargo run -- extract-frames --input runs/recordings/monitor-0.mp4 --out-dir runs/frames/monitor-0 --fps 0.5 --overwrite
+```
+
+Record any monitor index until interrupted:
+
+```sh
+cargo run -- record-monitor --monitor 2
+```
+
 Ask Codex where to click, without moving the mouse:
 
 ```sh

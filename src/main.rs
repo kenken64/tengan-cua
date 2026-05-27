@@ -40,6 +40,57 @@ enum Commands {
         #[arg(long, default_value = "screenshots")]
         out_dir: PathBuf,
     },
+    /// Record one monitor to an MP4 file using ffmpeg.
+    RecordMonitor {
+        /// Monitor index from `monitors`.
+        #[arg(long)]
+        monitor: usize,
+        /// Stop after this many seconds. Omit to record until interrupted.
+        #[arg(long)]
+        seconds: Option<u64>,
+        /// Output directory for generated recordings.
+        #[arg(long, default_value = "runs/recordings")]
+        out_dir: PathBuf,
+        /// Explicit output MP4 path. Overrides --out-dir.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// ffmpeg executable to run.
+        #[arg(long, default_value = "ffmpeg")]
+        ffmpeg_bin: String,
+        /// Capture framerate.
+        #[arg(long, default_value_t = 15)]
+        framerate: u32,
+        /// Do not draw the mouse cursor into the recording.
+        #[arg(long)]
+        no_mouse: bool,
+        /// Overwrite the output file if it already exists.
+        #[arg(long)]
+        overwrite: bool,
+        /// Extract sampled PNG frames to this directory after recording.
+        #[arg(long)]
+        frames_dir: Option<PathBuf>,
+        /// Frame sampling rate used with --frames-dir.
+        #[arg(long, default_value_t = 0.5)]
+        frame_fps: f32,
+    },
+    /// Extract sampled PNG frames from an MP4 using ffmpeg.
+    ExtractFrames {
+        /// Source MP4 file.
+        #[arg(long)]
+        input: PathBuf,
+        /// Output directory for PNG frames.
+        #[arg(long)]
+        out_dir: PathBuf,
+        /// Frame sampling rate, for example 0.5 means one frame every two seconds.
+        #[arg(long, default_value_t = 0.5)]
+        fps: f32,
+        /// ffmpeg executable to run.
+        #[arg(long, default_value = "ffmpeg")]
+        ffmpeg_bin: String,
+        /// Overwrite existing frame files.
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Capture screenshots and send them to Codex CLI with --image.
     AskCodex {
         /// Natural language desktop instruction, for example: "click the Save button".
@@ -189,6 +240,36 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::RecordMonitor {
+            monitor,
+            seconds,
+            out_dir,
+            output,
+            ffmpeg_bin,
+            framerate,
+            no_mouse,
+            overwrite,
+            frames_dir,
+            frame_fps,
+        } => record_monitor(
+            monitor,
+            seconds,
+            &out_dir,
+            output.as_deref(),
+            &ffmpeg_bin,
+            framerate,
+            !no_mouse,
+            overwrite,
+            frames_dir.as_deref(),
+            frame_fps,
+        ),
+        Commands::ExtractFrames {
+            input,
+            out_dir,
+            fps,
+            ffmpeg_bin,
+            overwrite,
+        } => extract_frames(&input, &out_dir, fps, &ffmpeg_bin, overwrite),
         Commands::AskCodex {
             instruction,
             monitor,
@@ -263,6 +344,204 @@ fn list_monitors() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn record_monitor(
+    monitor_index: usize,
+    seconds: Option<u64>,
+    out_dir: &Path,
+    output: Option<&Path>,
+    ffmpeg_bin: &str,
+    framerate: u32,
+    draw_mouse: bool,
+    overwrite: bool,
+    frames_dir: Option<&Path>,
+    frame_fps: f32,
+) -> Result<()> {
+    if !cfg!(target_os = "windows") {
+        bail!("record-monitor currently supports Windows ffmpeg gdigrab only");
+    }
+    if framerate == 0 {
+        bail!("--framerate must be greater than 0");
+    }
+    if seconds == Some(0) {
+        bail!("--seconds must be greater than 0 when provided");
+    }
+
+    let selected = select_monitors(Some(monitor_index), false)?
+        .into_iter()
+        .next()
+        .context("selected monitor was not found")?;
+
+    let monitor = selected.monitor;
+    let monitor_name = monitor
+        .friendly_name()
+        .unwrap_or_else(|_| "monitor".to_string());
+    let output_path = match output {
+        Some(path) => path.to_path_buf(),
+        None => {
+            fs::create_dir_all(out_dir)
+                .with_context(|| format!("failed to create {}", out_dir.display()))?;
+            out_dir.join(format!(
+                "monitor-{}-{}-{}.mp4",
+                monitor_index,
+                timestamp_millis()?,
+                normalized_filename(&monitor_name)
+            ))
+        }
+    };
+
+    if output_path.exists() && !overwrite {
+        bail!(
+            "{} already exists; pass --overwrite or choose a different --output",
+            output_path.display()
+        );
+    }
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
+
+    let origin_x = monitor.x()?;
+    let origin_y = monitor.y()?;
+    let width = monitor.width()?;
+    let height = monitor.height()?;
+    let video_size = format!("{width}x{height}");
+
+    println!(
+        "recording monitor_index={} name={:?} origin=({}, {}) size={}x{} framerate={} mouse={} output={}",
+        monitor_index,
+        monitor_name,
+        origin_x,
+        origin_y,
+        width,
+        height,
+        framerate,
+        draw_mouse,
+        output_path.display()
+    );
+    if let Some(seconds) = seconds {
+        println!("duration_seconds={seconds}");
+    } else {
+        println!("duration_seconds=until-interrupted");
+    }
+
+    let mut command = Command::new(ffmpeg_bin);
+    command
+        .arg("-hide_banner")
+        .arg(if overwrite { "-y" } else { "-n" })
+        .arg("-f")
+        .arg("gdigrab")
+        .arg("-draw_mouse")
+        .arg(if draw_mouse { "1" } else { "0" })
+        .arg("-framerate")
+        .arg(framerate.to_string())
+        .arg("-offset_x")
+        .arg(origin_x.to_string())
+        .arg("-offset_y")
+        .arg(origin_y.to_string())
+        .arg("-video_size")
+        .arg(video_size)
+        .arg("-i")
+        .arg("desktop");
+
+    if let Some(seconds) = seconds {
+        command.arg("-t").arg(seconds.to_string());
+    }
+
+    command
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-crf")
+        .arg("23")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg(&output_path);
+
+    let status = command
+        .status()
+        .with_context(|| format!("failed to start `{ffmpeg_bin}`"))?;
+
+    if !status.success() {
+        bail!("ffmpeg exited with status {status}");
+    }
+
+    println!("recording_saved={}", output_path.display());
+    if let Some(frames_dir) = frames_dir {
+        extract_frames(&output_path, frames_dir, frame_fps, ffmpeg_bin, overwrite)?;
+    }
+
+    Ok(())
+}
+
+fn extract_frames(
+    input: &Path,
+    out_dir: &Path,
+    fps: f32,
+    ffmpeg_bin: &str,
+    overwrite: bool,
+) -> Result<()> {
+    if !input.exists() {
+        bail!("input video does not exist: {}", input.display());
+    }
+    if !fps.is_finite() || fps <= 0.0 {
+        bail!("--fps must be greater than 0");
+    }
+
+    fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+
+    if !overwrite && has_existing_frame_files(out_dir)? {
+        bail!(
+            "{} already contains frame_*.png files; pass --overwrite or choose a different --out-dir",
+            out_dir.display()
+        );
+    }
+
+    let pattern = out_dir.join("frame_%05d.png");
+    println!(
+        "extracting_frames input={} fps={} output_pattern={}",
+        input.display(),
+        fps,
+        pattern.display()
+    );
+
+    let status = Command::new(ffmpeg_bin)
+        .arg("-hide_banner")
+        .arg(if overwrite { "-y" } else { "-n" })
+        .arg("-i")
+        .arg(input)
+        .arg("-vf")
+        .arg(format!("fps={fps}"))
+        .arg(&pattern)
+        .status()
+        .with_context(|| format!("failed to start `{ffmpeg_bin}`"))?;
+
+    if !status.success() {
+        bail!("ffmpeg exited with status {status}");
+    }
+
+    println!("frames_saved_dir={}", out_dir.display());
+    Ok(())
+}
+
+fn has_existing_frame_files(out_dir: &Path) -> Result<bool> {
+    for entry in
+        fs::read_dir(out_dir).with_context(|| format!("failed to read {}", out_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", out_dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("frame_") && name.ends_with(".png") {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn ask_codex(
