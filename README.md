@@ -73,6 +73,24 @@ cargo run -- ask-codex "click the Save button" --execute
 When `--execute` runs actions, the app prints a colored transcript with each
 mouse, keyboard, or scroll action before it is performed.
 
+Run the Stake/Tengan domain agent once in dry-run mode:
+
+```sh
+cargo run -- stake-agent --monitor 1 --once
+```
+
+Run the Stake/Tengan domain agent and execute only validated click actions:
+
+```sh
+cargo run -- stake-agent --monitor 1 --execute
+```
+
+The Stake agent loads `Agents.md`, asks Codex for structured game state plus
+semantic actions using `schemas/stake_agent.schema.json`, validates hard
+guardrails before execution, persists session counters in
+`runs/stake-agent-state.json`, and performs a verification observation after
+executed actions. Use `--reset-state` after a stopped session.
+
 Use a specific monitor:
 
 ```sh

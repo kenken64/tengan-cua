@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "confidence", "phase", "state", "safety", "actions"],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["pre_bet", "insurance", "in_hand", "split_hand", "dealing", "idle", "abort", "unknown"]
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tengan", "table"],
+      "properties": {
+        "tengan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "true_count",
+            "run_count",
+            "decks_remaining",
+            "hands_played",
+            "recommended_action",
+            "hand_state",
+            "edge_percent",
+            "next_bet",
+            "deviation_note"
+          ],
+          "properties": {
+            "true_count": {
+              "type": ["number", "null"]
+            },
+            "run_count": {
+              "type": ["integer", "null"]
+            },
+            "decks_remaining": {
+              "type": ["number", "null"]
+            },
+            "hands_played": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "recommended_action": {
+              "type": ["string", "null"],
+              "enum": ["HIT", "STAND", "DOUBLE", "SPLIT", "INSURANCE", "NO_INSURANCE", "YES", "NO", "NONE", null]
+            },
+            "hand_state": {
+              "type": ["string", "null"]
+            },
+            "edge_percent": {
+              "type": ["number", "null"]
+            },
+            "next_bet": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "deviation_note": {
+              "type": ["string", "null"]
+            }
+          }
+        },
+        "table": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "countdown_seconds",
+            "balance",
+            "total_bet",
+            "your_hand_value",
+            "dealer_upcard",
+            "kopioh_seat_label",
+            "bet_placed",
+            "bet_amount",
+            "total_hands",
+            "active_hand_idx",
+            "result_text"
+          ],
+          "properties": {
+            "countdown_seconds": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "balance": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "total_bet": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "your_hand_value": {
+              "type": ["string", "null"]
+            },
+            "dealer_upcard": {
+              "type": ["string", "null"]
+            },
+            "kopioh_seat_label": {
+              "type": ["string", "null"]
+            },
+            "bet_placed": {
+              "type": ["boolean", "null"]
+            },
+            "bet_amount": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "total_hands": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "active_hand_idx": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "result_text": {
+              "type": ["string", "null"]
+            }
+          }
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["abort", "reason", "hazards"],
+      "properties": {
+        "abort": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": ["string", "null"]
+        },
+        "hazards": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "captcha",
+              "human_verification",
+              "login_prompt",
+              "payment_prompt",
+              "two_factor_prompt",
+              "unexpected_dialog",
+              "tengan_offline",
+              "connection_issue",
+              "video_frozen",
+              "wrong_table",
+              "wrong_seat"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "monitor_index",
+          "x",
+          "y",
+          "button",
+          "chip_value",
+          "bet_target",
+          "description"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["observe", "click_button", "click_chip", "click_bet_circle", "click_deal_now", "click_undo"]
+          },
+          "monitor_index": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "x": {
+            "type": ["integer", "null"]
+          },
+          "y": {
+            "type": ["integer", "null"]
+          },
+          "button": {
+            "type": ["string", "null"],
+            "enum": ["hit", "stand", "double", "split", "insurance_yes", "insurance_no", "other", null]
+          },
+          "chip_value": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "bet_target": {
+            "type": ["string", "null"],
+            "enum": ["main", "side_213", "pairs", "other_seat", null]
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,6 +11,8 @@ use clap::{Parser, Subcommand};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use serde::{Deserialize, Serialize};
 use xcap::Monitor;
+
+mod stake_agent;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,6 +60,8 @@ enum Commands {
         #[arg(long)]
         execute: bool,
     },
+    /// Run the Stake Blackjack/Tengan autonomous observe-act-verify loop.
+    StakeAgent(stake_agent::StakeAgentArgs),
     /// Execute a JSON action plan previously produced by `ask-codex`.
     Execute {
         /// Path to the JSON action plan.
@@ -91,15 +96,15 @@ enum MouseButton {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ActionPlan {
-    summary: String,
-    confidence: f32,
-    actions: Vec<Action>,
+pub(crate) struct ActionPlan {
+    pub(crate) summary: String,
+    pub(crate) confidence: f32,
+    pub(crate) actions: Vec<Action>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Action {
+pub(crate) enum Action {
     MoveMouse {
         #[serde(default)]
         monitor_index: Option<usize>,
@@ -141,16 +146,16 @@ enum Action {
 }
 
 #[derive(Debug)]
-struct CapturedScreen {
-    path: PathBuf,
-    monitor_index: usize,
-    origin_x: i32,
-    origin_y: i32,
-    desktop_width: u32,
-    desktop_height: u32,
-    image_width: u32,
-    image_height: u32,
-    monitor_name: String,
+pub(crate) struct CapturedScreen {
+    pub(crate) path: PathBuf,
+    pub(crate) monitor_index: usize,
+    pub(crate) origin_x: i32,
+    pub(crate) origin_y: i32,
+    pub(crate) desktop_width: u32,
+    pub(crate) desktop_height: u32,
+    pub(crate) image_width: u32,
+    pub(crate) image_height: u32,
+    pub(crate) monitor_name: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,6 +207,7 @@ fn main() -> Result<()> {
                 execute,
             )
         }
+        Commands::StakeAgent(args) => stake_agent::run(args),
         Commands::Execute {
             plan,
             origin_x,
@@ -223,7 +229,7 @@ fn init_dpi_awareness() {
     }
 }
 
-fn default_codex_bin() -> String {
+pub(crate) fn default_codex_bin() -> String {
     if cfg!(target_os = "windows") {
         "codex.cmd".to_string()
     } else {
@@ -231,7 +237,7 @@ fn default_codex_bin() -> String {
     }
 }
 
-fn platform_name() -> &'static str {
+pub(crate) fn platform_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "Windows"
     } else if cfg!(target_os = "macos") {
@@ -279,15 +285,26 @@ fn ask_codex(
         command.arg("--image").arg(&capture.path);
     }
 
-    let status = command
+    let mut child = command
         .arg("--output-schema")
         .arg(&schema_path)
         .arg("--output-last-message")
         .arg(&response_path)
-        .arg(prompt)
-        .stdin(Stdio::null())
-        .status()
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to start `{codex_bin}`"))?;
+
+    {
+        let mut stdin = child.stdin.take().context("failed to open Codex stdin")?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .context("failed to write prompt to Codex stdin")?;
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for `{codex_bin}`"))?;
 
     if !status.success() {
         bail!("Codex CLI exited with status {status}");
@@ -346,7 +363,7 @@ User instruction: {}",
     )
 }
 
-fn capture_monitors(
+pub(crate) fn capture_monitors(
     monitor_index: Option<usize>,
     all_monitors: bool,
     out_dir: &Path,
@@ -455,7 +472,10 @@ fn execute_plan(
     })
 }
 
-fn execute_plan_for_captures(plan: &ActionPlan, captures: &[CapturedScreen]) -> Result<()> {
+pub(crate) fn execute_plan_for_captures(
+    plan: &ActionPlan,
+    captures: &[CapturedScreen],
+) -> Result<()> {
     execute_plan_with_transform_resolver(plan, |action| {
         let Some(monitor_index) = action.monitor_index() else {
             if captures.len() == 1 {
@@ -642,7 +662,7 @@ fn transcript_action(step: usize, total: usize, action: &str, details: &str) {
     );
 }
 
-fn print_capture(capture: &CapturedScreen) {
+pub(crate) fn print_capture(capture: &CapturedScreen) {
     let transform = capture.coordinate_transform();
     println!(
         "monitor_index={} screenshot={} origin=({}, {}) desktop_size={}x{} image_size={}x{} scale=({:.3}, {:.3})",
@@ -752,7 +772,7 @@ fn read_plan(path: &Path) -> Result<ActionPlan> {
     serde_json::from_str(&json).with_context(|| format!("invalid action plan {}", path.display()))
 }
 
-fn timestamp_millis() -> Result<u128> {
+pub(crate) fn timestamp_millis() -> Result<u128> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before UNIX_EPOCH")?
