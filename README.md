@@ -109,6 +109,17 @@ Run the Stake/Tengan domain agent once in dry-run mode:
 cargo run -- stake-agent --monitor 1 --once
 ```
 
+Run repeated dry-run observations on a monitor:
+
+```sh
+cargo run -- stake-agent --monitor 0 --interval-seconds 4
+```
+
+Dry-run is the default. Without `--execute`, the agent captures the screen,
+asks Codex for a validated semantic plan, prints the proposed state/actions, and
+does not click anything. Safety aborts, such as low balance or verification
+prompts, stop the built-in loop.
+
 Run the Stake/Tengan domain agent and execute only validated click actions:
 
 ```sh
@@ -120,6 +131,15 @@ semantic actions using `schemas/stake_agent.schema.json`, validates hard
 guardrails before execution, persists session counters in
 `runs/stake-agent-state.json`, and performs a verification observation after
 executed actions. Use `--reset-state` after a stopped session.
+
+`Agents.md` is the table policy prompt. Version 1.4 includes guards for Tengan
+panel modes before acting: live helper, strategy/cards/history tabs, side-bet
+widgets, reset-count modal, cropped or unreadable panels, and the Chrome
+debugging banner. Only live helper data should drive betting or hand decisions.
+The split button is documented as blue.
+
+Generated captures, response JSON, logs, and extracted video frames are ignored
+under `runs/`, `screenshots/`, `video/runs/`, and `video/screenshots/`.
 
 Use a specific monitor:
 

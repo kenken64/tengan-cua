@@ -1,4 +1,6 @@
 /target
 /runs
 /screenshots
+/video/runs
+/video/screenshots
 *.log
