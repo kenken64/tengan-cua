@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Action, ActionPlan, CapturedScreen, capture_monitors, default_codex_bin,
-    execute_plan_for_captures, platform_name, print_capture, timestamp_millis,
+    execute_plan_for_captures, platform::platform_description, print_capture, timestamp_millis,
 };
 
 const SESSION_LIMIT_MILLIS: u128 = 60 * 60 * 1000;
@@ -452,7 +452,7 @@ When no hazards are visible, set safety.hazards to an empty array. \
 POLICY FROM Agents.md:\n{policy}\n\n\
 PERSISTED SESSION STATE:\n{}\n\n\
 SCREENSHOTS:\n{screenshots}",
-        platform_name(),
+        platform_description(),
         serde_json::to_string_pretty(session)?
     ))
 }

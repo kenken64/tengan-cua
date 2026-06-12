@@ -18,11 +18,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "monitor_index", "x", "y", "text", "amount"],
+        "required": ["type", "monitor_index", "x", "y", "text", "amount", "key", "window"],
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["move_mouse", "click", "double_click", "right_click", "type_text", "scroll"]
+            "enum": ["move_mouse", "click", "double_click", "right_click", "type_text", "paste_text", "press_key", "scroll", "focus_window"]
           },
           "monitor_index": {
             "type": ["integer", "null"],
@@ -37,11 +37,20 @@
             "description": "Y coordinate relative to the screenshot image."
           },
           "text": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Text for type_text or paste_text. Use paste_text for terminal commands, long text, or punctuation-heavy text."
           },
           "amount": {
             "type": ["integer", "null"],
             "description": "Scroll wheel clicks. Positive means down, negative means up."
+          },
+          "key": {
+            "type": ["string", "null"],
+            "description": "Keyboard key for press_key actions. Named keys: enter, escape, tab, backspace, delete, space, arrow_up, arrow_down, arrow_left, arrow_right, home, end, page_up, page_down, f1-f12. OS-aware shortcuts that map to the correct modifier for the operating system named in the prompt: select_all, copy, paste, cut, undo, redo, save, find, new_tab, close_tab. Modifier combos joined with '+', for example cmd+l, ctrl+shift+t, alt+f4; cmd and primary mean Command on macOS and Control on Windows/Linux, while ctrl is always the literal Control key. Use enter for Return/Enter. For ordinary text-field replacement, use select_all before paste_text. For terminal prompt replacement, use control_a then control_k before paste_text. Null for non-key actions."
+          },
+          "window": {
+            "type": ["string", "null"],
+            "description": "Window title (preferred) or application name for focus_window actions, copied exactly from the visible windows list in the prompt. Null for all other actions."
           }
         }
       }

@@ -3,16 +3,24 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::{Deserialize, Serialize};
 use xcap::Monitor;
 
+mod keys;
+mod platform;
 mod stake_agent;
+mod windows;
+
+use keys::KeySpec;
+pub(crate) use platform::platform_name;
+use windows::WindowInfo;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -28,6 +36,10 @@ struct Cli {
 enum Commands {
     /// List visible monitors and their desktop coordinate origins.
     Monitors,
+    /// List visible application windows and their desktop bounds.
+    Windows,
+    /// Show the detected operating system and its keyboard shortcut conventions.
+    OsInfo,
     /// Capture monitor screenshot PNG files.
     Capture {
         /// Monitor index from `monitors`, or omit to use the primary monitor.
@@ -185,6 +197,21 @@ pub(crate) enum Action {
         monitor_index: Option<usize>,
         text: String,
     },
+    PasteText {
+        #[serde(default)]
+        monitor_index: Option<usize>,
+        text: String,
+    },
+    PressKey {
+        #[serde(default)]
+        monitor_index: Option<usize>,
+        key: KeySpec,
+    },
+    FocusWindow {
+        #[serde(default)]
+        monitor_index: Option<usize>,
+        window: String,
+    },
     Scroll {
         #[serde(default)]
         monitor_index: Option<usize>,
@@ -229,6 +256,11 @@ fn main() -> Result<()> {
 
     match Cli::parse().command {
         Commands::Monitors => list_monitors(),
+        Commands::Windows => list_windows(),
+        Commands::OsInfo => {
+            print_os_info();
+            Ok(())
+        }
         Commands::Capture {
             monitor,
             all_monitors,
@@ -318,16 +350,46 @@ pub(crate) fn default_codex_bin() -> String {
     }
 }
 
-pub(crate) fn platform_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Windows"
-    } else if cfg!(target_os = "macos") {
-        "macOS"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else {
-        std::env::consts::OS
+fn print_os_info() {
+    println!("platform={}", platform::platform_description());
+    println!(
+        "primary_shortcut_modifier={}",
+        platform::primary_modifier_name()
+    );
+    println!(
+        "key_mapping: cmd/primary -> {}, ctrl -> Control, alt/option -> {}, win/super/meta -> {}",
+        platform::primary_modifier_name(),
+        if cfg!(target_os = "macos") {
+            "Option"
+        } else {
+            "Alt"
+        },
+        if cfg!(target_os = "macos") {
+            "Command"
+        } else {
+            "Super/Windows key"
+        },
+    );
+    println!(
+        "semantic_shortcuts: select_all, copy, paste, cut, undo, redo, save, find, new_tab, close_tab map to the {} conventions",
+        platform_name()
+    );
+}
+
+fn list_windows() -> Result<()> {
+    for window in windows::list_windows()? {
+        println!(
+            "app={:?} title={:?} desktop_bounds=({}, {}, {}x{}) focused={}",
+            window.app,
+            window.title,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
+            window.focused
+        );
     }
+    Ok(())
 }
 
 fn list_monitors() -> Result<()> {
@@ -553,9 +615,13 @@ fn ask_codex(
     execute: bool,
 ) -> Result<()> {
     let captures = capture_monitors(monitor_index, all_monitors, out_dir)?;
+    let visible_windows = windows::list_windows().unwrap_or_else(|err| {
+        transcript_notice(&format!("window listing unavailable: {err}"));
+        Vec::new()
+    });
     let response_path = out_dir.join(format!("codex-action-{}.json", timestamp_millis()?));
     let schema_path = PathBuf::from("schemas").join("codex_action.schema.json");
-    let prompt = build_codex_prompt(instruction, &captures);
+    let prompt = build_codex_prompt(instruction, &captures, &visible_windows);
 
     let mut command = Command::new(codex_bin);
     command.arg("exec").arg("--skip-git-repo-check");
@@ -604,7 +670,11 @@ fn ask_codex(
     Ok(())
 }
 
-fn build_codex_prompt(instruction: &str, captures: &[CapturedScreen]) -> String {
+fn build_codex_prompt(
+    instruction: &str,
+    captures: &[CapturedScreen],
+    visible_windows: &[WindowInfo],
+) -> String {
     let screenshots = captures
         .iter()
         .enumerate()
@@ -626,17 +696,60 @@ fn build_codex_prompt(instruction: &str, captures: &[CapturedScreen]) -> String 
         .collect::<Vec<_>>()
         .join("; ");
 
+    let windows_text = if visible_windows.is_empty() {
+        "unavailable".to_string()
+    } else {
+        visible_windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "app={:?} title={:?} desktop_bounds=({}, {}, {}x{}) focused={}",
+                    window.app,
+                    window.title,
+                    window.x,
+                    window.y,
+                    window.width,
+                    window.height,
+                    window.focused
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+
     format!(
         "You are controlling a {} desktop from attached screenshot images. \
+The primary keyboard shortcut modifier on this operating system is {}. \
 Return only a JSON action plan matching the schema. \
 Use coordinates relative to the selected screenshot image pixels, not absolute desktop coordinates. \
 For every coordinate action, set monitor_index to the monitor_index of the screenshot image used for that coordinate. \
 For actions without coordinates, set monitor_index to null. \
+For press_key, key accepts named keys (enter, escape, tab, backspace, delete, space, arrow_up, arrow_down, arrow_left, arrow_right, home, end, page_up, page_down, f1-f12), \
+OS-aware shortcuts that map to the correct modifier on this operating system (select_all, copy, paste, cut, undo, redo, save, find, new_tab, close_tab), \
+and modifier combos joined with + such as cmd+l, ctrl+c, alt+f4, or cmd+shift+t. \
+In combos, cmd and primary mean Command on macOS and Control on Windows and Linux, while ctrl always means the literal Control key; \
+use ctrl only for terminal control sequences and use cmd or the OS-aware shortcut names for ordinary application shortcuts. \
+Visible windows: {}. \
+Window desktop_bounds are absolute desktop coordinates; use each screenshot's desktop_origin and desktop_size to locate a window inside the screenshot image. \
+If the user instruction names an application or window, first return a focus_window action whose window field is copied exactly from the matching visible window's title, or its app name when the title is empty or the whole application is meant, \
+then target every later coordinate and keyboard action inside that window's desktop_bounds region of the screenshot. \
+If the named application or window does not match any visible window, return an empty actions array and explain the mismatch in summary. \
+For Enter/Return and other non-text keys, use press_key; never submit by using type_text with a newline. \
+For terminal commands on macOS Terminal, iTerm, tmux, Codex, Claude, or shell panes, first click the exact target prompt, then clear any existing prompt draft with press_key control_a followed by press_key control_k, then use paste_text for the command text without a trailing newline, then use press_key enter if the user asked to run or submit it. \
+For ordinary text fields, search boxes, chat inputs, forms, and editable UI controls where the user asks to replace the current text, first click the exact field, then use press_key select_all, then use paste_text for the new text without a trailing newline. \
+Use paste_text instead of type_text for terminal commands, long text, or text containing shell punctuation; use type_text only for short ordinary text fields. \
+Terminal targeting rules: when multiple Terminal, tmux, Codex, Claude, or shell windows/panes are visible, first list the visible candidates mentally by window title, active tab title, project path, prompt text, and frontmost/inactive visual state. \
+Choose a terminal candidate only if it satisfies every user-specified anchor such as project name, path, window title, tab title, pane label, or visible prompt text. \
+If the user says current, active, or front terminal, use the visually frontmost active terminal window; do not use a background or lower terminal just because it also matches the app type. \
+If more than one candidate still matches, or if the requested project/path cannot be read, return an empty actions array and explain the ambiguity in summary. \
+Ignore pasted prior-result prose inside the user instruction, especially sentences beginning with Targeted, Clicked, Typed, Pressed, Submitted, or summary-like descriptions of previous actions; treat those as context, not new targeting requirements. \
 Screenshots: {}. \
 Prefer a single precise click action when the user asks to click a visible target. \
 If the target is ambiguous, return an empty actions array and explain the ambiguity in summary. \
 User instruction: {}",
-        platform_name(),
+        platform::platform_description(),
+        platform::primary_modifier_name(),
+        windows_text,
         screenshots,
         instruction
     )
@@ -776,12 +889,12 @@ fn execute_plan_with_transform_resolver<F>(plan: &ActionPlan, mut transform_for:
 where
     F: FnMut(&Action) -> Result<CoordinateTransform>,
 {
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|err| anyhow!("{err}"))?;
-
     if plan.actions.is_empty() {
         transcript_notice("plan has no actions to execute");
         return Ok(());
     }
+
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|err| anyhow!("{err}"))?;
 
     let action_count = plan.actions.len();
     transcript_header(&format!(
@@ -882,6 +995,48 @@ where
                 );
                 enigo.text(text).map_err(|err| anyhow!("{err}"))?;
             }
+            Action::PasteText { text, .. } => {
+                transcript_action(
+                    step,
+                    action_count,
+                    "paste_text",
+                    &format!(
+                        "monitor={} text={}",
+                        format_monitor_index(action.monitor_index()),
+                        json_string(text)
+                    ),
+                );
+                paste_text(&mut enigo, text)?;
+            }
+            Action::PressKey { key, .. } => {
+                transcript_action(
+                    step,
+                    action_count,
+                    "press_key",
+                    &format!(
+                        "monitor={} key={}",
+                        format_monitor_index(action.monitor_index()),
+                        json_string(key.as_str())
+                    ),
+                );
+                key.press(&mut enigo)?;
+            }
+            Action::FocusWindow { window, .. } => {
+                transcript_action(
+                    step,
+                    action_count,
+                    "focus_window",
+                    &format!("window={}", json_string(window)),
+                );
+                let focused = windows::focus_window(window)?;
+                transcript_notice(&format!(
+                    "focused app={:?} title={:?}",
+                    focused.app, focused.title
+                ));
+                // Give the window manager time to raise the window before
+                // the next click or keystroke lands.
+                thread::sleep(Duration::from_millis(400));
+            }
             Action::Scroll { amount, x, y, .. } => {
                 if let (Some(x), Some(y)) = (x, y) {
                     let transform = transform_for(action)?;
@@ -976,6 +1131,9 @@ impl Action {
             | Action::DoubleClick { monitor_index, .. }
             | Action::RightClick { monitor_index, .. }
             | Action::TypeText { monitor_index, .. }
+            | Action::PasteText { monitor_index, .. }
+            | Action::PressKey { monitor_index, .. }
+            | Action::FocusWindow { monitor_index, .. }
             | Action::Scroll { monitor_index, .. } => *monitor_index,
         }
     }
@@ -1045,6 +1203,78 @@ fn move_and_click(enigo: &mut Enigo, x: i32, y: i32, button: Button) -> Result<(
     Ok(())
 }
 
+fn paste_text(enigo: &mut Enigo, text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    if cfg!(target_os = "macos") {
+        if let Err(err) = paste_text_macos(enigo, text) {
+            transcript_notice(&format!(
+                "macOS paste_text failed; falling back to type_text: {err}"
+            ));
+            enigo.text(text).map_err(|err| anyhow!("{err}"))?;
+        }
+        return Ok(());
+    }
+
+    enigo.text(text).map_err(|err| anyhow!("{err}"))?;
+    Ok(())
+}
+
+fn paste_text_macos(enigo: &mut Enigo, text: &str) -> Result<()> {
+    let previous_clipboard = read_macos_clipboard().ok();
+    write_macos_clipboard(text.as_bytes())?;
+    thread::sleep(Duration::from_millis(80));
+    let paste_result = paste_clipboard_hotkey(enigo);
+    thread::sleep(Duration::from_millis(250));
+
+    if let Some(previous_clipboard) = previous_clipboard {
+        if let Err(err) = write_macos_clipboard(&previous_clipboard) {
+            transcript_notice(&format!(
+                "failed to restore macOS clipboard after paste: {err}"
+            ));
+        }
+    }
+
+    paste_result
+}
+
+fn read_macos_clipboard() -> Result<Vec<u8>> {
+    let output = Command::new("pbpaste")
+        .output()
+        .context("failed to run pbpaste")?;
+    if !output.status.success() {
+        bail!("pbpaste exited with status {}", output.status);
+    }
+    Ok(output.stdout)
+}
+
+fn write_macos_clipboard(bytes: &[u8]) -> Result<()> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to run pbcopy")?;
+
+    {
+        let mut stdin = child.stdin.take().context("failed to open pbcopy stdin")?;
+        stdin
+            .write_all(bytes)
+            .context("failed to write to pbcopy")?;
+    }
+
+    let status = child.wait().context("failed to wait for pbcopy")?;
+    if !status.success() {
+        bail!("pbcopy exited with status {status}");
+    }
+
+    Ok(())
+}
+
+fn paste_clipboard_hotkey(enigo: &mut Enigo) -> Result<()> {
+    keys::press_chord(enigo, &[platform::primary_modifier()], Key::Unicode('v'))
+}
+
 fn read_plan(path: &Path) -> Result<ActionPlan> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("failed to read action plan {}", path.display()))?;
@@ -1088,7 +1318,10 @@ impl From<MouseButton> for Button {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ActionPlan, CoordinateTransform, coordinate_scale};
+    use super::{
+        Action, ActionPlan, CapturedScreen, CoordinateTransform, WindowInfo, build_codex_prompt,
+        coordinate_scale,
+    };
 
     #[test]
     fn parses_strict_schema_click_with_nullable_unused_fields() {
@@ -1129,6 +1362,210 @@ mod tests {
         assert!(
             matches!(plan.actions[0], Action::TypeText { monitor_index: None, ref text } if text == "hello")
         );
+    }
+
+    #[test]
+    fn parses_strict_schema_press_key_with_enter() {
+        let json = r#"{
+            "summary": "press enter",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "press_key", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": "enter"}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            Action::PressKey {
+                monitor_index: None,
+                key
+            } if key.as_str() == "enter"
+        ));
+    }
+
+    #[test]
+    fn rejects_press_key_with_unknown_key() {
+        let json = r#"{
+            "summary": "press bogus key",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "press_key", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": "warp_drive"}
+            ]
+        }"#;
+
+        assert!(serde_json::from_str::<ActionPlan>(json).is_err());
+    }
+
+    #[test]
+    fn parses_strict_schema_press_key_with_modifier_combo() {
+        let json = r#"{
+            "summary": "focus address bar",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "press_key", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": "cmd+l", "window": null}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            Action::PressKey {
+                monitor_index: None,
+                key
+            } if key.as_str() == "cmd+l"
+        ));
+    }
+
+    #[test]
+    fn parses_strict_schema_focus_window() {
+        let json = r#"{
+            "summary": "focus the Chrome window",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "focus_window", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": null, "window": "Stake.com - Blackjack"}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            Action::FocusWindow {
+                monitor_index: None,
+                window
+            } if window == "Stake.com - Blackjack"
+        ));
+    }
+
+    #[test]
+    fn parses_strict_schema_terminal_clear_control_key() {
+        let json = r#"{
+            "summary": "clear prompt",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "press_key", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": "control_a"}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            Action::PressKey {
+                monitor_index: None,
+                key
+            } if key.as_str() == "control_a"
+        ));
+    }
+
+    #[test]
+    fn parses_strict_schema_select_all() {
+        let json = r#"{
+            "summary": "select field contents",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "press_key", "monitor_index": null, "x": null, "y": null, "text": null, "amount": null, "key": "select_all"}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            &plan.actions[0],
+            Action::PressKey {
+                monitor_index: None,
+                key
+            } if key.as_str() == "select_all"
+        ));
+    }
+
+    #[test]
+    fn parses_strict_schema_paste_text() {
+        let json = r#"{
+            "summary": "paste command",
+            "confidence": 0.9,
+            "actions": [
+                {"type": "paste_text", "monitor_index": null, "x": null, "y": null, "text": "cargo test", "amount": null, "key": null}
+            ]
+        }"#;
+
+        let plan: ActionPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plan.actions.len(), 1);
+        assert!(
+            matches!(plan.actions[0], Action::PasteText { monitor_index: None, ref text } if text == "cargo test")
+        );
+    }
+
+    fn test_captures() -> Vec<CapturedScreen> {
+        vec![CapturedScreen {
+            path: "runs/screen.png".into(),
+            monitor_index: 0,
+            origin_x: 0,
+            origin_y: 0,
+            desktop_width: 1440,
+            desktop_height: 900,
+            image_width: 2880,
+            image_height: 1800,
+            monitor_name: "Built-in Retina Display".to_string(),
+        }]
+    }
+
+    #[test]
+    fn prompt_tells_codex_to_paste_terminal_commands_without_newline() {
+        let prompt = build_codex_prompt("run cargo test in the terminal", &test_captures(), &[]);
+
+        assert!(prompt.contains("use paste_text for the command text without a trailing newline"));
+        assert!(prompt.contains("press_key control_a followed by press_key control_k"));
+        assert!(prompt.contains("press_key select_all"));
+        assert!(prompt.contains("then use press_key enter"));
+    }
+
+    #[test]
+    fn prompt_describes_operating_system_and_keyboard_conventions() {
+        let prompt = build_codex_prompt("copy the selected text", &test_captures(), &[]);
+
+        assert!(prompt.contains(super::platform_name()));
+        assert!(prompt.contains(&format!(
+            "The primary keyboard shortcut modifier on this operating system is {}",
+            super::platform::primary_modifier_name()
+        )));
+        assert!(prompt.contains("cmd and primary mean Command on macOS and Control on Windows and Linux"));
+        assert!(prompt.contains("select_all, copy, paste, cut, undo, redo, save, find, new_tab, close_tab"));
+        assert!(prompt.contains("Visible windows: unavailable"));
+    }
+
+    #[test]
+    fn prompt_lists_visible_windows_and_focus_window_rule() {
+        let visible_windows = vec![WindowInfo {
+            app: "Google Chrome".to_string(),
+            title: "Stake.com - Blackjack".to_string(),
+            x: 100,
+            y: 50,
+            width: 1280,
+            height: 800,
+            focused: true,
+            id: None,
+        }];
+
+        let prompt = build_codex_prompt(
+            "click Hit in the Stake.com Chrome window",
+            &test_captures(),
+            &visible_windows,
+        );
+
+        assert!(prompt.contains(
+            "app=\"Google Chrome\" title=\"Stake.com - Blackjack\" desktop_bounds=(100, 50, 1280x800) focused=true"
+        ));
+        assert!(prompt.contains("first return a focus_window action"));
     }
 
     #[test]
